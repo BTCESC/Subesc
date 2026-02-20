@@ -13,7 +13,7 @@ def init_db():
     conn = sqlite3.connect('coleccion_arte.db', check_same_thread=False)
     c = conn.cursor()
     try:
-        c.execute("SELECT casa FROM obras LIMIT 1")
+        c.execute("SELECT imagen_cuadro FROM obras LIMIT 1")
     except sqlite3.OperationalError:
         c.execute("DROP TABLE IF EXISTS obras")
         c.execute('''CREATE TABLE obras 
