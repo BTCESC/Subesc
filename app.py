@@ -1,8 +1,8 @@
 import streamlit as st
 import sqlite3
 import os
-import base64
-from openai import OpenAI
+import google.generativeai as genai
+from PIL import Image
 from datetime import date
 
 # 1. BASE DE DATOS
@@ -12,65 +12,58 @@ c.execute('''CREATE TABLE IF NOT EXISTS obras
              (autor TEXT, precio_real REAL, ratio REAL, imagen_cuadro TEXT, imagen_ficha TEXT, casa TEXT, fecha TEXT)''')
 conn.commit()
 
-# 2. FUNCIÓN DE IA MEJORADA
-def analizar_ficha(client, imagen_ficha):
-    base64_ficha = base64.b64encode(imagen_ficha.read()).decode('utf-8')
-    
-    prompt = """Analiza esta ficha de subasta. 
-    Extrae estrictamente en este formato: Autor|PrecioMartillo|Alto|Ancho
-    Usa solo números para precio y medidas (en cm)."""
-    
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=[{"role": "user", "content": [
-            {"type": "text", "text": prompt},
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_ficha}"}}
-        ]}]
-    )
-    return response.choices[0].message.content
+# 2. CONFIGURACIÓN DE GEMINI
+st.set_page_config(page_title="Gestor Subastas Gemini", layout="wide")
+st.title("🚀 Tasador de Arte con Google Gemini")
 
-# 3. INTERFAZ MEJORADA
-st.set_page_config(page_title="Gestor Subastas Pro", layout="wide")
-st.title("🎨 Clasificador de Arte Inteligente")
+api_key = st.sidebar.text_input("Introduce tu Google API Key (Gemini)", type="password")
 
-api_key = st.sidebar.text_input("Pega tu OpenAI API Key", type="password")
+if api_key:
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-1.5-flash') # El más rápido y gratuito
+
+# 3. INTERFAZ
 menu = st.sidebar.selectbox("Menú", ["Nueva Subasta", "Mi Colección"])
 
 if menu == "Nueva Subasta":
-    st.subheader("📸 Registro Separado de Obra")
+    st.subheader("📸 Captura de Datos")
     
     col1, col2 = st.columns(2)
     with col1:
-        foto_cuadro = st.file_uploader("1. Sube solo la foto del CUADRO", type=['jpg', 'png', 'jpeg'])
-        foto_ficha = st.file_uploader("2. Sube solo la foto de la FICHA/DATOS", type=['jpg', 'png', 'jpeg'])
+        foto_cuadro = st.file_uploader("1. Foto del CUADRO", type=['jpg', 'png', 'jpeg'])
+        foto_ficha = st.file_uploader("2. Foto de la FICHA (Datos)", type=['jpg', 'png', 'jpeg'])
     
     with col2:
         casa = st.text_input("Casa de Subastas")
-        fecha_subasta = st.date_input("Fecha de la subasta", date.today())
+        fecha_subasta = st.date_input("Fecha", date.today())
         comision_pct = st.number_input("Comisión (%)", value=26.6)
 
-    if st.button("🚀 Procesar y Organizar") and foto_cuadro and foto_ficha:
+    if st.button("🚀 Analizar con Gemini") and foto_cuadro and foto_ficha:
         if not api_key:
-            st.error("Falta la API Key en la barra lateral.")
+            st.error("Introduce la API Key en la barra lateral")
         else:
-            client = OpenAI(api_key=api_key)
-            with st.spinner("Leyendo ficha técnica..."):
+            with st.spinner("Gemini está leyendo la ficha técnica..."):
                 try:
-                    # IA analiza solo la ficha
-                    datos = analizar_ficha(client, foto_ficha)
-                    autor, precio_m, alto, ancho = datos.split("|")
+                    # Convertir imagen para Gemini
+                    img_ficha = Image.open(foto_ficha)
+                    
+                    prompt = "Analiza esta ficha de subasta. Extrae: Autor, Precio de martillo (solo número), Alto (cm), Ancho (cm). Responde así: Autor|Precio|Alto|Ancho"
+                    
+                    response = model.generate_content([prompt, img_ficha])
+                    datos = response.text.strip().split("|")
+                    
+                    autor, precio_m, alto, ancho = datos[0], float(datos[1]), float(datos[2]), float(datos[3])
                     
                     # Cálculos
-                    precio_r = float(precio_m) * (1 + comision_pct/100)
-                    ratio = precio_r / (float(alto) * float(ancho))
+                    precio_r = precio_m * (1 + comision_pct/100)
+                    ratio = precio_r / (alto * ancho) if (alto * ancho) > 0 else 0
                     
-                    # Organización de carpetas
+                    # Guardar fotos localmente
                     autor_folder = f"fotos/{autor.replace(' ', '_')}"
                     if not os.path.exists(autor_folder): os.makedirs(autor_folder)
                     
-                    # Guardar ambas fotos
-                    path_cuadro = f"{autor_folder}/CUADRO_{foto_cuadro.name}"
-                    path_ficha = f"{autor_folder}/FICHA_{foto_ficha.name}"
+                    path_cuadro = f"{autor_folder}/C_{foto_cuadro.name}"
+                    path_ficha = f"{autor_folder}/F_{foto_ficha.name}"
                     
                     with open(path_cuadro, "wb") as f: f.write(foto_cuadro.getbuffer())
                     with open(path_ficha, "wb") as f: f.write(foto_ficha.getbuffer())
@@ -80,12 +73,14 @@ if menu == "Nueva Subasta":
                               (autor, precio_r, ratio, path_cuadro, path_ficha, casa, str(fecha_subasta)))
                     conn.commit()
                     
-                    st.success(f"✅ Guardado: {autor}. Precio: {precio_r:,.2f}€")
+                    st.success(f"✅ ¡Éxito! Guardado {autor} en la colección.")
+                    st.balloons()
+                    
                 except Exception as e:
                     st.error(f"Error: {e}")
 
 elif menu == "Mi Colección":
-    st.subheader("📚 Tu Galería de Autores")
+    st.subheader("📚 Historial de Subastas")
     obras = c.execute("SELECT * FROM obras ORDER BY fecha DESC").fetchall()
     
     for o in obras:
@@ -94,5 +89,7 @@ elif menu == "Mi Colección":
             with c1:
                 st.image(o[3], caption="Obra")
             with c2:
-                st.image(o[4], caption="Ficha Técnica", width=200)
-                st.write(f"**Precio Real:** {o[1]:,.2f}€ | **Ratio:** {o[2]:.4f}")
+                st.image(o[4], caption="Ficha", width=200)
+                st.write(f"**Precio Real:** {o[1]:,.2f}€")
+                st.write(f"**Ratio:** {o[2]:.4f} €/cm²")
+                st.write(f"**Casa:** {o[5]}")
