@@ -6,13 +6,24 @@ from PIL import Image
 from datetime import date
 import re
 
-# --- CONFIGURACIÓN DE BASE DE DATOS ---
+# --- CONFIGURACIÓN DE BASE DE DATOS CON REPARACIÓN ---
 def init_db():
     conn = sqlite3.connect('coleccion_arte.db', check_same_thread=False)
     c = conn.cursor()
+    # Intentamos crear la tabla con la estructura completa
     c.execute('''CREATE TABLE IF NOT EXISTS obras 
                  (autor TEXT, precio_real REAL, ratio REAL, imagen_cuadro TEXT, 
                   imagen_ficha TEXT, casa TEXT, fecha TEXT)''')
+    
+    # TRUCO: Si la tabla ya existía pero es vieja, añadimos las columnas que falten
+    try:
+        c.execute("ALTER TABLE obras ADD COLUMN imagen_ficha TEXT")
+        c.execute("ALTER TABLE obras ADD COLUMN casa TEXT")
+        c.execute("ALTER TABLE obras ADD COLUMN fecha TEXT")
+    except sqlite3.OperationalError:
+        # Si da error es porque las columnas ya existen, así que no hacemos nada
+        pass
+        
     conn.commit()
     return conn
 
@@ -30,7 +41,6 @@ menu = st.sidebar.selectbox("Menú", ["Nueva Subasta", "Mi Colección"])
 
 # --- FUNCIÓN PARA LIMPIAR NÚMEROS ---
 def limpiar_numero(texto):
-    # Extrae solo números y puntos/comas
     numeros = re.findall(r"[-+]?\d*\.\d+|\d+", texto.replace(',', '.'))
     return float(numeros[0]) if numeros else 0.0
 
@@ -57,9 +67,7 @@ if menu == "Nueva Subasta":
             with st.spinner("Gemini analizando ficha técnica..."):
                 try:
                     genai.configure(api_key=api_key)
-                    
-                    # Intentar con varios nombres de modelos comunes para evitar el Error 404
-                    modelos_probar = ['gemini-1.5-flash', 'gemini-1.5-flash-8b', 'gemini-1.0-pro-vision-latest']
+                    modelos_probar = ['gemini-1.5-flash', 'gemini-1.5-pro']
                     response = None
                     
                     img_ficha = Image.open(foto_ficha)
@@ -70,8 +78,7 @@ if menu == "Nueva Subasta":
                             model = genai.GenerativeModel(nombre_modelo)
                             response = model.generate_content([prompt, img_ficha])
                             if response: break
-                        except:
-                            continue
+                        except: continue
 
                     if response and response.text:
                         datos = response.text.strip().split("|")
@@ -81,7 +88,6 @@ if menu == "Nueva Subasta":
                             alto = limpiar_numero(datos[2])
                             ancho = limpiar_numero(datos[3])
                             
-                            # Cálculos
                             precio_real = p_martillo * (1 + comision_pct / 100)
                             superficie = alto * ancho
                             ratio = precio_real / superficie if superficie > 0 else 0
@@ -102,26 +108,29 @@ if menu == "Nueva Subasta":
                             conn.commit()
                             
                             st.success(f"✅ ¡{autor} guardado!")
-                            st.metric("Precio Real", f"{precio_real:,.2f} €")
                             st.balloons()
-                        else:
-                            st.error("Formato de respuesta inesperado. Reintenta.")
                 except Exception as e:
                     st.error(f"❌ Error: {e}")
 
 elif menu == "Mi Colección":
     st.subheader("📚 Tu Historial")
-    obras = c.execute("SELECT * FROM obras ORDER BY fecha DESC").fetchall()
-    
-    if not obras:
-        st.info("Catálogo vacío.")
-    else:
-        for o in obras:
-            with st.expander(f"📅 {o[6]} | {o[0]} - {o[5]}"):
-                c1, c2, c3 = st.columns([2, 1, 2])
-                with c1: st.image(o[3], caption="Obra")
-                with c2: st.image(o[4], caption="Ficha")
-                with c3:
-                    st.write(f"**Casa:** {o[5]}")
-                    st.write(f"**Precio Total:** {o[1]:,.2f} €")
-                    st.write(f"**Ratio:** {o[2]:.4f} €/cm²")
+    try:
+        obras = c.execute("SELECT * FROM obras ORDER BY fecha DESC").fetchall()
+        
+        if not obras:
+            st.info("Catálogo vacío.")
+        else:
+            for o in obras:
+                # El bloque expander ahora usa los índices correctos de la tabla actualizada
+                with st.expander(f"📅 {o[6]} | {o[0]} - {o[5]}"):
+                    c1, c2, c3 = st.columns([2, 1, 2])
+                    with c1: 
+                        if os.path.exists(o[3]): st.image(o[3], caption="Obra")
+                    with c2: 
+                        if os.path.exists(o[4]): st.image(o[4], caption="Ficha")
+                    with c3:
+                        st.write(f"**Casa:** {o[5]}")
+                        st.write(f"**Precio Total:** {o[1]:,.2f} €")
+                        st.write(f"**Ratio:** {o[2]:.4f} €/cm²")
+    except Exception as e:
+        st.error("Hubo un problema con la base de datos. Por favor, reinicia la app en Streamlit Cloud.")
