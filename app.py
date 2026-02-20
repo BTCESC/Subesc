@@ -168,6 +168,24 @@ elif menu == "📚 Ver Mi Colección":
                         st.write(f"💰 **Precio Total:** {obra[1]:,.2f} €")
                         st.write(f"📏 **Ratio:** {obra[2]:.4f} €/cm²")
                         st.write(f"📅 **Fecha:** {obra[6]}")
+                        
+                        st.write("") # Espacio en blanco
+                        # BOTÓN DE BORRAR
+                        # Usamos la ruta de la imagen (obra[3]) como ID único y clave del botón
+                        if st.button("🗑️ Borrar esta obra", key=f"del_{obra[3]}"):
+                            # 1. Borramos de la base de datos
+                            c.execute("DELETE FROM obras WHERE imagen_cuadro=?", (obra[3],))
+                            conn.commit()
+                            
+                            # 2. Borramos las imágenes físicas del servidor/ordenador
+                            if os.path.exists(obra[3]):
+                                os.remove(obra[3])
+                            if os.path.exists(obra[4]):
+                                os.remove(obra[4])
+                                
+                            # 3. Recargamos la aplicación para que desaparezca visualmente
+                            st.rerun()
+
                     with col_img_c:
                         if os.path.exists(obra[3]): st.image(obra[3], caption="Cuadro", use_column_width=True)
                     with col_img_f:
