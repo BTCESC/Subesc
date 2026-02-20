@@ -6,11 +6,10 @@ from PIL import Image
 from datetime import date
 import re
 
-# --- 1. BASE DE DATOS (REPARACIÓN TOTAL) ---
+# --- 1. BASE DE DATOS ---
 def init_db():
     conn = sqlite3.connect('coleccion_arte.db', check_same_thread=False)
     c = conn.cursor()
-    # Si la tabla no tiene la columna 'casa', la borramos para crearla bien
     try:
         c.execute("SELECT casa FROM obras LIMIT 1")
     except sqlite3.OperationalError:
@@ -50,71 +49,68 @@ if menu == "➕ Subir Nueva Obra":
 
     if st.button("🚀 Analizar y Guardar"):
         if not api_key:
-            st.error("Pon la API Key en la izquierda.")
+            st.error("Por favor, pega tu clave API en el menú de la izquierda.")
         elif not foto_cuadro or not foto_ficha:
             st.warning("Faltan fotos.")
         else:
-            with st.spinner("Gemini analizando..."):
+            with st.spinner("Buscando modelo compatible y analizando..."):
                 try:
                     genai.configure(api_key=api_key)
                     
-                    # --- SOLUCIÓN AL ERROR 404: Probamos varios nombres de modelo ---
-                    model_found = False
-                    for model_name in ['gemini-1.5-flash', 'gemini-1.5-flash-latest']:
-                        try:
-                            model = genai.GenerativeModel(model_name)
-                            img_ficha = Image.open(foto_ficha)
-                            prompt = "Analiza esta ficha. Responde estrictamente: Autor|PrecioMartillo|Alto|Ancho"
-                            response = model.generate_content([prompt, img_ficha])
-                            if response:
-                                model_found = True
-                                break
-                        except:
-                            continue
+                    # DIAGNÓSTICO: Buscar modelos disponibles en tu cuenta
+                    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
+                    # Filtramos los que son de visión (flash o pro)
+                    vision_models = [m for m in available_models if "flash" in m or "pro" in m]
                     
-                    if not model_found:
-                        st.error("No se pudo conectar con los modelos de Gemini. Revisa tu API Key.")
+                    if not vision_models:
+                        st.error("Tu API Key no tiene acceso a modelos de visión. Revisa tu cuenta en Google AI Studio.")
                     else:
-                        datos = response.text.strip().split("|")
-                        autor_raw = datos[0].strip().upper()
-                        p_martillo = limpiar_numero(datos[1])
-                        alto = limpiar_numero(datos[2])
-                        ancho = limpiar_numero(datos[3])
+                        # Usamos el primer modelo de visión disponible
+                        selected_model = vision_models[0]
+                        model = genai.GenerativeModel(selected_model)
                         
-                        precio_r = p_martillo * (1 + comision_pct / 100)
-                        ratio = precio_r / (alto * ancho) if (alto * ancho) > 0 else 0
+                        img_ficha = Image.open(foto_ficha)
+                        prompt = "Analiza esta ficha. Responde estrictamente: Autor|PrecioMartillo|Alto|Ancho"
+                        response = model.generate_content([prompt, img_ficha])
                         
-                        # Crear carpetas por autor
-                        autor_folder = f"fotos/{autor_raw.replace(' ', '_')}"
-                        if not os.path.exists(autor_folder): os.makedirs(autor_folder)
+                        if response:
+                            datos = response.text.strip().split("|")
+                            autor_raw = datos[0].strip().upper()
+                            p_martillo = limpiar_numero(datos[1])
+                            alto = limpiar_numero(datos[2])
+                            ancho = limpiar_numero(datos[3])
+                            
+                            precio_r = p_martillo * (1 + comision_pct / 100)
+                            ratio = precio_r / (alto * ancho) if (alto * ancho) > 0 else 0
+                            
+                            autor_folder = f"fotos/{autor_raw.replace(' ', '_')}"
+                            if not os.path.exists(autor_folder): os.makedirs(autor_folder)
+                            
+                            path_c = f"{autor_folder}/C_{foto_cuadro.name}"
+                            path_f = f"{autor_folder}/F_{foto_ficha.name}"
+                            
+                            with open(path_c, "wb") as f: f.write(foto_cuadro.getbuffer())
+                            with open(path_f, "wb") as f: f.write(foto_ficha.getbuffer())
+                            
+                            c.execute("INSERT INTO obras VALUES (?, ?, ?, ?, ?, ?, ?)", 
+                                      (autor_raw, precio_r, ratio, path_c, path_f, casa_subasta, str(fecha_subasta)))
+                            conn.commit()
+                            st.success(f"✅ ¡Guardado con el modelo {selected_model}! Autor: {autor_raw}")
                         
-                        path_c = f"{autor_folder}/C_{foto_cuadro.name}"
-                        path_f = f"{autor_folder}/F_{foto_ficha.name}"
-                        
-                        with open(path_c, "wb") as f: f.write(foto_cuadro.getbuffer())
-                        with open(path_f, "wb") as f: f.write(foto_ficha.getbuffer())
-                        
-                        c.execute("INSERT INTO obras VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                                  (autor_raw, precio_r, ratio, path_c, path_f, casa_subasta, str(fecha_subasta)))
-                        conn.commit()
-                        st.success(f"✅ ¡Guardado! Autor: {autor_raw}")
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.error(f"Error detallado: {e}")
 
 # --- 4. COLECCIÓN AGRUPADA POR AUTOR ---
 elif menu == "📚 Ver Mi Colección":
     st.subheader("Tu Archivo Clasificado por Autores")
-    
     autores = c.execute("SELECT DISTINCT autor FROM obras ORDER BY autor ASC").fetchall()
     
     if not autores:
-        st.info("Tu colección está vacía. Sube algo primero.")
+        st.info("Tu colección está vacía.")
     else:
         for (nombre_autor,) in autores:
-            # Aquí está la "carpeta" por autor que querías
             with st.expander(f"📁 AUTOR: {nombre_autor}"):
                 obras_autor = c.execute("SELECT * FROM obras WHERE autor=? ORDER BY fecha DESC", (nombre_autor,)).fetchall()
-                
                 for obra in obras_autor:
                     col_info, col_img_c, col_img_f = st.columns([2, 2, 1])
                     with col_info:
@@ -123,9 +119,7 @@ elif menu == "📚 Ver Mi Colección":
                         st.write(f"📏 **Ratio:** {obra[2]:.4f} €/cm²")
                         st.write(f"📅 **Fecha:** {obra[6]}")
                     with col_img_c:
-                        if os.path.exists(obra[3]):
-                            st.image(obra[3], caption="Cuadro")
+                        if os.path.exists(obra[3]): st.image(obra[3], caption="Cuadro")
                     with col_img_f:
-                        if os.path.exists(obra[4]):
-                            st.image(obra[4], caption="Ficha", width=150)
+                        if os.path.exists(obra[4]): st.image(obra[4], caption="Ficha", width=150)
                     st.divider()
