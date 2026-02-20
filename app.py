@@ -110,8 +110,9 @@ if menu == "➕ Subir Nueva Obra":
                             with open(path_c, "wb") as f: f.write(foto_cuadro.getbuffer())
                             with open(path_f, "wb") as f: f.write(foto_ficha.getbuffer())
                             
-                            c.execute("INSERT INTO obras VALUES (?, ?, ?, ?, ?, ?, ?)", 
-                                      (autor_raw, precio_r, ratio, path_c, path_f, casa_subasta, str(fecha_subasta)))
+                            c.execute('''INSERT INTO obras (autor, precio_real, ratio, imagen_cuadro, imagen_ficha, casa, fecha) 
+             VALUES (?, ?, ?, ?, ?, ?, ?)''', 
+          (autor_raw, precio_r, ratio, path_c, path_f, casa_subasta, str(fecha_subasta)))
                             conn.commit()
                             st.success(f"✅ ¡Guardado con éxito! Autor detectado: {autor_raw}")
                         
