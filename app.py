@@ -1,59 +1,83 @@
 import streamlit as st
+import sqlite3
 import os
-import pandas as pd
-from openai import OpenAI
 from PIL import Image
+from datetime import date
 
-st.set_page_config(page_title="Gestor de Subastas Pro", layout="wide")
-st.title("🎨 Art Auction Intelligence (Multi-Foto)")
+# 1. CONFIGURACIÓN DE BASE DE DATOS (Añadimos columnas de fecha y casa)
+conn = sqlite3.connect('coleccion_arte.db', check_same_thread=False)
+c = conn.cursor()
+c.execute('''CREATE TABLE IF NOT EXISTS obras 
+             (autor TEXT, titulo TEXT, precio_real REAL, ratio REAL, 
+              imagen_ruta TEXT, casa_subasta TEXT, fecha_subasta TEXT)''')
+conn.commit()
 
-api_key = st.sidebar.text_input("Introduce tu OpenAI API Key", type="password")
-client = OpenAI(api_key=api_key) if api_key else None
+st.set_page_config(page_title="Mi Tasador de Arte Pro", layout="wide")
 
-# --- CARGA DE ARCHIVOS ---
-# Ahora permitimos subir más de una foto
-uploaded_files = st.file_uploader("Sube la foto del cuadro Y la de los datos", type=['jpg', 'jpeg', 'png'], accept_multiple_files=True)
+# --- MENÚ LATERAL ---
+menu = st.sidebar.selectbox("Selecciona una opción", ["Nueva Subasta", "Ver Mi Colección"])
 
-if uploaded_files and client:
-    cols = st.columns(len(uploaded_files))
-    for i, file in enumerate(uploaded_files):
-        with cols[i]:
-            st.image(file, caption=f"Imagen {i+1}", use_container_width=True)
+if menu == "Nueva Subasta":
+    st.title("🎨 Analizar y Registrar Obra")
     
-    if st.button("Procesar Obra"):
-        with st.spinner("La IA está analizando ambas imágenes..."):
-            # Aquí la IA leería las dos imágenes simultáneamente
-            # Una para identificar el cuadro y otra para el texto del catálogo
+    col_izq, col_der = st.columns(2)
+    
+    with col_izq:
+        files = st.file_uploader("Sube foto del cuadro y ficha", accept_multiple_files=True)
+        casa_input = st.text_input("Casa de Subastas (ej: Templum, Ansorena...)", placeholder="Nombre de la casa")
+        fecha_input = st.date_input("Fecha de la subasta", date.today())
+    
+    if st.button("Procesar y Guardar en Historial") and files:
+        with st.spinner("La IA está calculando el valor real..."):
+            # --- LÓGICA DE IA ---
+            # En la versión real, aquí llamaríamos a OpenAI para sacar el autor y precio
+            autor_detectado = "Charles James" 
+            precio_martillo = 1000.0
+            comision_pct = 26.6  # Aquí podrías poner un slider para ajustarlo
             
-            datos_ia = {
-                "autor": "Charles James", 
-                "precio_martillo": 1000.0,
-                "comision_casa": 26.6,
-                "ancho": 50,
-                "alto": 70
-            }
+            precio_r = precio_martillo * (1 + comision_pct/100)
+            ratio = precio_r / (50*70) # Ejemplo cm2
             
-            # Cálculos automáticos
-            precio_real = datos_ia["precio_martillo"] * (1 + datos_ia["comision_casa"]/100)
-            superficie = datos_ia["ancho"] * datos_ia["alto"]
-            ratio = precio_real / superficie
+            # Guardar imagen físicamente
+            if not os.path.exists(f"fotos/{autor_detectado}"):
+                os.makedirs(f"fotos/{autor_detectado}")
+            
+            ruta_foto = f"fotos/{autor_detectado}/{files[0].name}"
+            with open(ruta_foto, "wb") as f:
+                f.write(files[0].getbuffer())
+            
+            # GUARDAR EN BASE DE DATOS con los nuevos campos
+            c.execute("INSERT INTO obras VALUES (?, ?, ?, ?, ?, ?, ?)", 
+                      (autor_detectado, "Obra en subasta", precio_r, ratio, ruta_foto, casa_input, str(fecha_input)))
+            conn.commit()
+            st.success(f"✅ ¡Obra guardada! Registrada en {casa_input} para el día {fecha_input}")
 
-            st.success(f"### Análisis Completado: {datos_ia['autor']}")
-            
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Precio Real (con comisión)", f"{precio_real:,.2f} €")
-            m2.metric("Superficie", f"{superficie} cm²")
-            m3.metric("Ratio €/cm²", f"{ratio:.4f}")
-
-            # Organizar en carpetas
-            nombre_autor = datos_ia["autor"].replace(" ", "_")
-            if not os.path.exists(nombre_autor):
-                os.makedirs(nombre_autor)
-            
-            # Guardamos todas las fotos subidas en la carpeta del autor
-            for file in uploaded_files:
-                ruta = os.path.join(nombre_autor, file.name)
-                with open(ruta, "wb") as f:
-                    f.write(file.getbuffer())
-            
-            st.info(f"📁 Todas las fotos han sido guardadas en la carpeta de autor: **{nombre_autor}**")
+elif menu == "Ver Mi Colección":
+    st.title("📚 Historial de Obras y Casas de Subastas")
+    
+    # Obtener lista de autores para filtrar
+    autores = [row[0] for row in c.execute("SELECT DISTINCT autor FROM obras").fetchall()]
+    
+    if not autores:
+        st.info("Tu catálogo está vacío. Sube una foto en 'Nueva Subasta'.")
+    else:
+        autor_sel = st.selectbox("Filtrar por Pintor", ["Todos"] + autores)
+        
+        # Consulta según el filtro
+        if autor_sel == "Todos":
+            obras = c.execute("SELECT * FROM obras ORDER BY fecha_subasta DESC").fetchall()
+        else:
+            obras = c.execute("SELECT * FROM obras WHERE autor=? ORDER BY fecha_subasta DESC", (autor_sel,)).fetchall()
+        
+        for obra in obras:
+            with st.expander(f"🖼️ {obra[0]} - {obra[5]} ({obra[6]})"):
+                c1, c2 = st.columns([1, 2])
+                with c1:
+                    if os.path.exists(obra[4]):
+                        st.image(obra[4], use_container_width=True)
+                with c2:
+                    st.write(f"🏛️ **Casa de Subastas:** {obra[5]}")
+                    st.write(f"📅 **Fecha:** {obra[6]}")
+                    st.write(f"💰 **Precio Real:** {obra[2]:,.2f} €")
+                    st.write(f"📏 **Ratio de Inversión:** {obra[3]:.4f} €/cm²")
+                    st.info(f"Ficha técnica guardada para {obra[0]}")
