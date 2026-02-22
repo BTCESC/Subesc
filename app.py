@@ -1,39 +1,27 @@
 import streamlit as st
-import sqlite3
-import os
 import google.generativeai as genai
 from PIL import Image
 from datetime import date
 import uuid
 import json
+from supabase import create_client, Client
 
-# --- 1. BASE DE DATOS ---
-@st.cache_resource
-def init_db():
-    conn = sqlite3.connect('coleccion_arte.db', check_same_thread=False)
-    c = conn.cursor()
-    
-    # 1. Crea la tabla original si no existe
-    c.execute('''CREATE TABLE IF NOT EXISTS obras 
-                 (autor TEXT, precio_real REAL, ratio REAL, imagen_cuadro TEXT, 
-                  imagen_ficha TEXT, casa TEXT, fecha TEXT)''')
-                  
-    # 2. Truco para NO perder datos: Comprueba si existe la columna "tecnica". 
-    # Si da error (porque no existe en tu BD antigua), la añade automáticamente.
-    try:
-        c.execute("SELECT tecnica FROM obras LIMIT 1")
-    except sqlite3.OperationalError:
-        c.execute("ALTER TABLE obras ADD COLUMN tecnica TEXT DEFAULT 'Desconocida'")
-        
-    conn.commit()
-    return conn
-
-conn = init_db()
-c = conn.cursor()
-
-# --- 2. CONFIGURACIÓN ---
+# --- 1. CONFIGURACIÓN INICIAL ---
 st.set_page_config(page_title="Archivo de Arte Pro", layout="wide")
-st.title("🎨 Mi Clasificador de Subastas")
+st.title("🎨 Mi Clasificador de Subastas (Modo Nube ☁️)")
+
+# --- 2. CONEXIÓN A SUPABASE ---
+@st.cache_resource
+def init_supabase():
+    url = st.secrets["SUPABASE_URL"]
+    key = st.secrets["SUPABASE_KEY"]
+    return create_client(url, key)
+
+try:
+    supabase: Client = init_supabase()
+except Exception as e:
+    st.error("⚠️ Faltan las claves de Supabase. Recuerda poner SUPABASE_URL y SUPABASE_KEY en los Secrets de Streamlit.")
+    st.stop()
 
 st.sidebar.header("⚙️ Configuración")
 api_key = st.sidebar.text_input("Introduce tu Google API Key", type="password")
@@ -88,7 +76,6 @@ if menu == "➕ Subir Nueva Obra":
                         Si un dato no aparece, pon 0 para los números o "Desconocido" para el texto. NO incluyas texto extra, solo el JSON.
                         """
                         
-                        # Generación con temperatura 0.0 para que sea analítico y no invente datos
                         response = model.generate_content(
                             [prompt, img_ficha],
                             generation_config=genai.types.GenerationConfig(temperature=0.0)
@@ -98,7 +85,6 @@ if menu == "➕ Subir Nueva Obra":
                             texto_limpio = response.text.replace('```json', '').replace('```', '').strip()
                             datos = json.loads(texto_limpio)
                             
-                            # Guardamos los resultados temporalmente en memoria
                             st.session_state['datos_temporales'] = {
                                 "autor": str(datos.get("autor", "Desconocido")).strip().upper(),
                                 "tecnica": str(datos.get("tecnica", "Desconocida")).strip().capitalize(),
@@ -108,14 +94,12 @@ if menu == "➕ Subir Nueva Obra":
                             }
                             st.success("✅ Ficha leída. Por favor, revisa y confirma los datos abajo.")
                             
-                except json.JSONDecodeError:
-                    st.error("Error: La IA no devolvió los datos correctamente. Inténtalo de nuevo.")
                 except Exception as e:
-                    st.error(f"Error detallado: {e}")
+                    st.error(f"Error: {e}")
 
-    # PASO 2: REVISAR, CORREGIR Y GUARDAR
+    # PASO 2: REVISAR Y GUARDAR EN NUBE
     if 'datos_temporales' in st.session_state:
-        st.info("✏️ Revisa los datos extraídos. Puedes modificar lo que la IA no haya leído bien.")
+        st.info("✏️ Revisa los datos extraídos.")
         
         with st.form("form_confirmacion"):
             col_txt1, col_txt2 = st.columns(2)
@@ -132,76 +116,94 @@ if menu == "➕ Subir Nueva Obra":
             with col_dim2:
                 ancho_editado = st.number_input("Ancho (cm)", value=st.session_state['datos_temporales']['ancho'], format="%.2f")
                 
-            confirmar = st.form_submit_button("💾 2. Confirmar y Guardar en Colección")
+            confirmar = st.form_submit_button("☁️ 2. Subir a la Colección en Nube")
             
             if confirmar:
                 if foto_cuadro and foto_ficha:
-                    # Cálculos con los datos definitivos
-                    precio_r = precio_editado * (1 + comision_pct / 100)
-                    ratio = precio_r / (alto_editado * ancho_editado) if (alto_editado * ancho_editado) > 0 else 0
-                    
-                    autor_folder = f"fotos/{autor_editado.replace(' ', '_')}"
-                    if not os.path.exists(autor_folder): os.makedirs(autor_folder)
-                    
-                    id_unico = uuid.uuid4().hex[:8]
-                    path_c = f"{autor_folder}/C_{id_unico}_{foto_cuadro.name}"
-                    path_f = f"{autor_folder}/F_{id_unico}_{foto_ficha.name}"
-                    
-                    with open(path_c, "wb") as f: f.write(foto_cuadro.getbuffer())
-                    with open(path_f, "wb") as f: f.write(foto_ficha.getbuffer())
-                    
-                    # Inserción blindada con la nueva columna 'tecnica'
-                    c.execute('''INSERT INTO obras (autor, precio_real, ratio, imagen_cuadro, imagen_ficha, casa, fecha, tecnica) 
-                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
-                              (autor_editado, precio_r, ratio, path_c, path_f, casa_subasta, str(fecha_subasta), tecnica_editada))
-                    conn.commit()
-                    
-                    # Borramos la memoria para subir la siguiente obra
-                    del st.session_state['datos_temporales']
-                    st.success(f"🎉 ¡Obra de {autor_editado} guardada con éxito!")
-                    st.rerun() # Fuerza a limpiar la pantalla automáticamente
+                    with st.spinner("Subiendo archivos y datos a Supabase..."):
+                        precio_r = precio_editado * (1 + comision_pct / 100)
+                        ratio = precio_r / (alto_editado * ancho_editado) if (alto_editado * ancho_editado) > 0 else 0
+                        
+                        id_unico = str(uuid.uuid4().hex[:8])
+                        autor_limpio = autor_editado.replace(' ', '_')
+                        
+                        # 1. Subir fotos
+                        path_c = f"{autor_limpio}/C_{id_unico}_{foto_cuadro.name}"
+                        supabase.storage.from_('fotos').upload(
+                            file=foto_cuadro.getvalue(), 
+                            path=path_c, 
+                            file_options={"content-type": foto_cuadro.type}
+                        )
+                        url_c = supabase.storage.from_('fotos').get_public_url(path_c)
+                        
+                        path_f = f"{autor_limpio}/F_{id_unico}_{foto_ficha.name}"
+                        supabase.storage.from_('fotos').upload(
+                            file=foto_ficha.getvalue(), 
+                            path=path_f, 
+                            file_options={"content-type": foto_ficha.type}
+                        )
+                        url_f = supabase.storage.from_('fotos').get_public_url(path_f)
+                        
+                        # 2. Guardar datos
+                        data = {
+                            "autor": autor_editado,
+                            "tecnica": tecnica_editada,
+                            "precio_real": precio_r,
+                            "ratio": ratio,
+                            "imagen_cuadro": url_c,
+                            "imagen_ficha": url_f,
+                            "casa": casa_subasta,
+                            "fecha": str(fecha_subasta)
+                        }
+                        supabase.table("obras").insert(data).execute()
+                        
+                        del st.session_state['datos_temporales']
+                        st.success(f"🎉 ¡Obra de {autor_editado} subida permanentemente!")
+                        st.rerun()
                 else:
-                    st.error("Las fotos se han perdido de la pantalla, por favor vuelve a seleccionarlas.")
+                    st.error("Faltan las fotos.")
 
-# --- 4. COLECCIÓN AGRUPADA POR AUTOR ---
+# --- 4. COLECCIÓN AGRUPADA ---
 elif menu == "📚 Ver Mi Colección":
     st.subheader("Tu Archivo Clasificado por Autores")
-    autores = c.execute("SELECT DISTINCT autor FROM obras ORDER BY autor ASC").fetchall()
     
-    if not autores:
-        st.info("Tu colección está vacía. ¡Empieza a subir cuadros!")
+    with st.spinner("Cargando tu colección desde la nube..."):
+        response = supabase.table("obras").select("*").order("fecha", desc=True).execute()
+        obras = response.data
+    
+    if not obras:
+        st.info("Tu colección en la nube está vacía. ¡Empieza a subir cuadros!")
     else:
-        for (nombre_autor,) in autores:
+        autores = sorted(list(set([obra['autor'] for obra in obras])))
+        
+        for nombre_autor in autores:
             with st.expander(f"📁 AUTOR: {nombre_autor}"):
-                obras_autor = c.execute("SELECT * FROM obras WHERE autor=? ORDER BY fecha DESC", (nombre_autor,)).fetchall()
+                obras_autor = [o for o in obras if o['autor'] == nombre_autor]
+                
                 for obra in obras_autor:
                     col_info, col_img_c, col_img_f = st.columns([2, 2, 1])
                     with col_info:
-                        # Extraemos los datos basándonos en el orden de las columnas (técnica es la última: índice 7)
-                        st.write(f"🏛️ **Casa:** {obra[5]}")
-                        st.write(f"🖌️ **Técnica:** {obra[7]}") # <-- AQUI MOSTRAMOS LA TECNICA
-                        st.write(f"💰 **Precio Total:** {obra[1]:,.2f} €")
-                        st.write(f"📏 **Ratio:** {obra[2]:.4f} €/cm²")
-                        st.write(f"📅 **Fecha:** {obra[6]}")
+                        st.write(f"🏛️ **Casa:** {obra['casa']}")
+                        st.write(f"🖌️ **Técnica:** {obra['tecnica']}")
+                        st.write(f"💰 **Precio Total:** {obra['precio_real']:,.2f} €")
+                        st.write(f"📏 **Ratio:** {obra['ratio']:.4f} €/cm²")
+                        st.write(f"📅 **Fecha:** {obra['fecha']}")
                         
-                        st.write("") # Espacio en blanco
-                        # BOTÓN DE BORRAR
-                        if st.button("🗑️ Borrar esta obra", key=f"del_{obra[3]}"):
-                            # 1. Borramos de la base de datos
-                            c.execute("DELETE FROM obras WHERE imagen_cuadro=?", (obra[3],))
-                            conn.commit()
-                            
-                            # 2. Borramos las imágenes físicas
-                            if os.path.exists(obra[3]):
-                                os.remove(obra[3])
-                            if os.path.exists(obra[4]):
-                                os.remove(obra[4])
+                        st.write("") 
+                        if st.button("🗑️ Borrar esta obra", key=f"del_{obra['id']}"):
+                            try:
+                                path_c = obra['imagen_cuadro'].split('/fotos/')[-1]
+                                path_f = obra['imagen_ficha'].split('/fotos/')[-1]
+                                supabase.storage.from_('fotos').remove([path_c, path_f])
+                            except:
+                                pass
                                 
-                            # 3. Recargamos la aplicación
+                            supabase.table("obras").delete().eq("id", obra['id']).execute()
                             st.rerun()
 
                     with col_img_c:
-                        if os.path.exists(obra[3]): st.image(obra[3], caption="Cuadro", use_column_width=True)
+                        if obra['imagen_cuadro']: st.image(obra['imagen_cuadro'], caption="Cuadro", use_container_width=True)
                     with col_img_f:
-                        if os.path.exists(obra[4]): st.image(obra[4], caption="Ficha")
+                        if obra['imagen_ficha']: st.image(obra['imagen_ficha'], caption="Ficha", use_container_width=True)
                     st.divider()
+
