@@ -12,15 +12,19 @@ import json
 def init_db():
     conn = sqlite3.connect('coleccion_arte.db', check_same_thread=False)
     c = conn.cursor()
+    
+    # 1. Crea la tabla original si no existe
+    c.execute('''CREATE TABLE IF NOT EXISTS obras 
+                 (autor TEXT, precio_real REAL, ratio REAL, imagen_cuadro TEXT, 
+                  imagen_ficha TEXT, casa TEXT, fecha TEXT)''')
+                  
+    # 2. Truco para NO perder datos: Comprueba si existe la columna "tecnica". 
+    # Si da error (porque no existe en tu BD antigua), la añade automáticamente.
     try:
-        # Busca imagen_cuadro en vez de casa. Si tenías la base de datos vieja, 
-        # esto fallará a propósito, borrará la antigua y creará la nueva perfecta.
-        c.execute("SELECT imagen_cuadro FROM obras LIMIT 1")
+        c.execute("SELECT tecnica FROM obras LIMIT 1")
     except sqlite3.OperationalError:
-        c.execute("DROP TABLE IF EXISTS obras")
-        c.execute('''CREATE TABLE obras 
-                     (autor TEXT, precio_real REAL, ratio REAL, imagen_cuadro TEXT, 
-                      imagen_ficha TEXT, casa TEXT, fecha TEXT)''')
+        c.execute("ALTER TABLE obras ADD COLUMN tecnica TEXT DEFAULT 'Desconocida'")
+        
     conn.commit()
     return conn
 
@@ -72,14 +76,16 @@ if menu == "➕ Subir Nueva Obra":
                         Analiza cuidadosamente esta ficha técnica de una obra de arte en subasta. 
                         Busca el precio (puede aparecer como 'Precio de salida', 'Estimación', 'Salida', 'Remate' o un número con el símbolo €). 
                         Si hay un rango (ej: 1000 - 1500), coge el número más bajo.
+                        Busca también la TÉCNICA o TIPO de obra (ejemplo: óleo sobre lienzo, acuarela, litografía, grabado, técnica mixta, etc.).
                         Extrae los datos y devuelve ÚNICAMENTE un objeto JSON válido con esta estructura exacta:
                         {
                             "autor": "Nombre del autor",
+                            "tecnica": "Óleo sobre lienzo",
                             "precio_martillo": 1500.0,
                             "alto_cm": 100.0,
                             "ancho_cm": 80.0
                         }
-                        Si un dato no aparece, pon 0 para los números o "Desconocido" para el autor. NO incluyas texto extra, solo el JSON.
+                        Si un dato no aparece, pon 0 para los números o "Desconocido" para el texto. NO incluyas texto extra, solo el JSON.
                         """
                         
                         # Generación con temperatura 0.0 para que sea analítico y no invente datos
@@ -95,6 +101,7 @@ if menu == "➕ Subir Nueva Obra":
                             # Guardamos los resultados temporalmente en memoria
                             st.session_state['datos_temporales'] = {
                                 "autor": str(datos.get("autor", "Desconocido")).strip().upper(),
+                                "tecnica": str(datos.get("tecnica", "Desconocida")).strip().capitalize(),
                                 "precio": float(datos.get("precio_martillo", 0.0)),
                                 "alto": float(datos.get("alto_cm", 0.0)),
                                 "ancho": float(datos.get("ancho_cm", 0.0))
@@ -108,10 +115,15 @@ if menu == "➕ Subir Nueva Obra":
 
     # PASO 2: REVISAR, CORREGIR Y GUARDAR
     if 'datos_temporales' in st.session_state:
-        st.info("✏️ Revisa los datos extraídos. Puedes modificar el precio si la IA no lo leyó bien.")
+        st.info("✏️ Revisa los datos extraídos. Puedes modificar lo que la IA no haya leído bien.")
         
         with st.form("form_confirmacion"):
-            autor_editado = st.text_input("Autor", value=st.session_state['datos_temporales']['autor'])
+            col_txt1, col_txt2 = st.columns(2)
+            with col_txt1:
+                autor_editado = st.text_input("Autor", value=st.session_state['datos_temporales']['autor'])
+            with col_txt2:
+                tecnica_editada = st.text_input("Técnica / Soporte", value=st.session_state['datos_temporales']['tecnica'])
+
             precio_editado = st.number_input("Precio de Martillo / Salida (€)", value=st.session_state['datos_temporales']['precio'], format="%.2f")
             
             col_dim1, col_dim2 = st.columns(2)
@@ -138,15 +150,16 @@ if menu == "➕ Subir Nueva Obra":
                     with open(path_c, "wb") as f: f.write(foto_cuadro.getbuffer())
                     with open(path_f, "wb") as f: f.write(foto_ficha.getbuffer())
                     
-                    # Inserción blindada con los nombres exactos de las columnas
-                    c.execute('''INSERT INTO obras (autor, precio_real, ratio, imagen_cuadro, imagen_ficha, casa, fecha) 
-                                 VALUES (?, ?, ?, ?, ?, ?, ?)''', 
-                              (autor_editado, precio_r, ratio, path_c, path_f, casa_subasta, str(fecha_subasta)))
+                    # Inserción blindada con la nueva columna 'tecnica'
+                    c.execute('''INSERT INTO obras (autor, precio_real, ratio, imagen_cuadro, imagen_ficha, casa, fecha, tecnica) 
+                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)''', 
+                              (autor_editado, precio_r, ratio, path_c, path_f, casa_subasta, str(fecha_subasta), tecnica_editada))
                     conn.commit()
                     
                     # Borramos la memoria para subir la siguiente obra
                     del st.session_state['datos_temporales']
                     st.success(f"🎉 ¡Obra de {autor_editado} guardada con éxito!")
+                    st.rerun() # Fuerza a limpiar la pantalla automáticamente
                 else:
                     st.error("Las fotos se han perdido de la pantalla, por favor vuelve a seleccionarlas.")
 
@@ -164,26 +177,27 @@ elif menu == "📚 Ver Mi Colección":
                 for obra in obras_autor:
                     col_info, col_img_c, col_img_f = st.columns([2, 2, 1])
                     with col_info:
+                        # Extraemos los datos basándonos en el orden de las columnas (técnica es la última: índice 7)
                         st.write(f"🏛️ **Casa:** {obra[5]}")
+                        st.write(f"🖌️ **Técnica:** {obra[7]}") # <-- AQUI MOSTRAMOS LA TECNICA
                         st.write(f"💰 **Precio Total:** {obra[1]:,.2f} €")
                         st.write(f"📏 **Ratio:** {obra[2]:.4f} €/cm²")
                         st.write(f"📅 **Fecha:** {obra[6]}")
                         
                         st.write("") # Espacio en blanco
                         # BOTÓN DE BORRAR
-                        # Usamos la ruta de la imagen (obra[3]) como ID único y clave del botón
                         if st.button("🗑️ Borrar esta obra", key=f"del_{obra[3]}"):
                             # 1. Borramos de la base de datos
                             c.execute("DELETE FROM obras WHERE imagen_cuadro=?", (obra[3],))
                             conn.commit()
                             
-                            # 2. Borramos las imágenes físicas del servidor/ordenador
+                            # 2. Borramos las imágenes físicas
                             if os.path.exists(obra[3]):
                                 os.remove(obra[3])
                             if os.path.exists(obra[4]):
                                 os.remove(obra[4])
                                 
-                            # 3. Recargamos la aplicación para que desaparezca visualmente
+                            # 3. Recargamos la aplicación
                             st.rerun()
 
                     with col_img_c:
